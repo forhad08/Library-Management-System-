@@ -1,0 +1,12 @@
+{
+  "name": "library-management-system",
+  "version": "1.0.0",
+  "description": "Library Management System: Node.js + SQLite, with a bilingual (English/Bangla) web interface",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": { "node": ">=22.13" },
+  "optionalDependencies": { "better-sqlite3": "^11.5.0" },
+  "license": "MIT"
+}
