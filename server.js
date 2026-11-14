@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY, title TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, phone TEXT, dept TEXT, roll TEXT,
   pw TEXT NOT NULL, sq INTEGER DEFAULT 1, sa TEXT, status TEXT DEFAULT 'pending', joined TEXT);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, pw TEXT NOT NULL, role TEXT NOT NULL, sq INTEGER DEFAULT 1, sa TEXT);
+CREATE TABLE IF NOT EXISTS depts(id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS staff(id TEXT PRIMARY KEY, name TEXT NOT NULL, desig TEXT, phone TEXT);
 CREATE TABLE IF NOT EXISTS issues(id TEXT PRIMARY KEY, bookId TEXT REFERENCES books(id) ON DELETE SET NULL, mid TEXT REFERENCES members(id) ON DELETE SET NULL,
   issued TEXT, due TEXT, ret TEXT, renew INTEGER DEFAULT 0, paid INTEGER DEFAULT 0);
@@ -51,7 +52,7 @@ CREATE TABLE IF NOT EXISTS notifs(id TEXT PRIMARY KEY, mid TEXT REFERENCES membe
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, type TEXT, uid TEXT, exp INTEGER);
 CREATE INDEX IF NOT EXISTS ix_issues_book ON issues(bookId); CREATE INDEX IF NOT EXISTS ix_issues_mid ON issues(mid);
 `);
-const ORDER = ['renewq', 'notifs', 'issues', 'reserve', 'lost', 'purchases', 'books', 'suppliers', 'authors', 'cats', 'pubs', 'staff', 'notices', 'events', 'faqs', 'members', 'users'];
+const ORDER = ['renewq', 'notifs', 'issues', 'reserve', 'lost', 'purchases', 'books', 'suppliers', 'authors', 'cats', 'pubs', 'depts', 'staff', 'notices', 'events', 'faqs', 'members', 'users'];
 
 /* ---------- helpers ---------- */
 const DAY = 864e5, uid = () => crypto.randomBytes(4).toString('hex');
@@ -72,6 +73,15 @@ function settings() {
   const o = {}; all('SELECT * FROM settings').forEach(r => o[r.k] = r.v);
   ['fine', 'loan', 'max', 'rmax'].forEach(k => o[k] = +o[k] || 0);
   return o;
+}
+/* Editable site texts and department list: defaults are filled in only where missing, so older databases upgrade safely */
+const NEWSET = { hero: 'জ্ঞানের আলোয় আলোকিত হোক আগামী', herod: 'বই খুঁজুন, রিজার্ভ করুন, ই-বুক পড়ুন এবং আপনার লাইব্রেরি অ্যাকাউন্ট এক জায়গায় পরিচালনা করুন।', days: 'শনি–বৃহস্পতি', links: 'বই ক্যাটালগ|#catalogue\nসদস্য নিবন্ধন|#register\nনিয়মাবলি|#rules', hero_en: '', herod_en: '', days_en: '', logo: '' };
+const ensureSettings = () => Object.entries(NEWSET).forEach(([k, v]) => run('INSERT OR IGNORE INTO settings VALUES(?,?)', k, v));
+const DEPTS0 = ['কম্পিউটার', 'ইলেকট্রিক্যাল', 'সিভিল', 'মেকানিক্যাল', 'ইলেকট্রনিক্স', 'পাওয়ার'];
+function ensureDepts() {
+  if (get('SELECT COUNT(*) n FROM depts').n) return;
+  const names = [...DEPTS0]; all("SELECT DISTINCT dept FROM members WHERE dept IS NOT NULL AND dept<>''").forEach(r => { if (!names.includes(r.dept)) names.push(r.dept); });
+  names.forEach(name => ins('depts', { id: 'd' + uid(), name }));
 }
 const outN = id => get('SELECT COUNT(*) n FROM issues WHERE bookId=? AND ret IS NULL', id).n;
 const lostN = id => get("SELECT COUNT(*) n FROM lost WHERE bookId=? AND type='হারানো'", id).n;
@@ -106,9 +116,11 @@ function seed() {
     ins('events', { id: 'e1', title: 'ডিজিটাল লাইব্রেরি কর্মশালা', date: d(24), place: 'কম্পিউটার ল্যাব', desc: 'ই-বুক ও অনলাইন রিসোর্স ব্যবহারের হাতে-কলমে প্রশিক্ষণ।' });
     [['কীভাবে লাইব্রেরির সদস্য হব?', 'অনলাইনে সদস্য নিবন্ধন ফর্ম পূরণ করুন। লাইব্রেরিয়ান অনুমোদন দিলে লগইন করতে পারবেন।'], ['একসঙ্গে কয়টি বই নেওয়া যায়?', 'একজন সদস্য একসঙ্গে সর্বোচ্চ ৩টি বই নিতে পারেন।'], ['বই কতদিন রাখা যায়?', '১৪ দিন। প্রয়োজনে সর্বোচ্চ ২ বার মেয়াদ বাড়ানোর আবেদন করা যায়।'], ['দেরিতে ফেরত দিলে জরিমানা কত?', 'প্রতিদিন ৫ টাকা হারে জরিমানা প্রযোজ্য।'], ['বই হারিয়ে গেলে কী করব?', 'দ্রুত লাইব্রেরিয়ানকে জানান। বইয়ের মূল্য অনুযায়ী ক্ষতিপূরণ দিতে হবে।']].forEach((x, i) => ins('faqs', { id: 'f' + i, q: x[0], a: x[1] }));
     ins('notifs', { id: 't0', mid: 'm0', text: 'আপনার একটি বইয়ের মেয়াদ শেষ হয়েছে। দ্রুত ফেরত দিন।', date: d(-1), read: 0 });
+    ensureSettings(); ensureDepts();
   });
 }
 if (!get('SELECT COUNT(*) n FROM cats').n && !get('SELECT COUNT(*) n FROM users').n) seed();
+ensureSettings(); ensureDepts();
 
 /* ---------- sessions & security ---------- */
 function startSession(type, uid_) { const t = crypto.randomBytes(32).toString('hex'); run('DELETE FROM sessions WHERE exp<?', Date.now()); run('INSERT INTO sessions VALUES(?,?,?,?)', t, type, uid_, Date.now() + 7 * DAY); return t; }
@@ -127,12 +139,13 @@ const need = (s, roles) => {
   if (roles && !(s.t === 'admin' && roles.includes(s.u.role))) throw bad(403, 'You do not have permission for this action', 'এই কাজের অনুমতি আপনার নেই');
 };
 const str = (v, max = 300) => String(v ?? '').trim().slice(0, max);
+const deptOk = n => !get('SELECT COUNT(*) n FROM depts').n || !!get('SELECT 1 x FROM depts WHERE name=?', n);
 const emailOk = e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const emailTaken = (e, exceptId) => !!(get('SELECT id FROM members WHERE email=? AND id<>?', e, exceptId || '') || get('SELECT id FROM users WHERE email=? AND id<>?', e, exceptId || ''));
 
 /* ---------- data for the browser (what each role may see) ---------- */
 function dataFor(s) {
-  const db = { set: settings(), cats: all('SELECT * FROM cats'), authors: all('SELECT * FROM authors'), pubs: all('SELECT * FROM pubs'), books: all('SELECT * FROM books'), notices: all('SELECT * FROM notices'), events: all('SELECT * FROM events'), faqs: all('SELECT * FROM faqs') };
+  const db = { set: settings(), cats: all('SELECT * FROM cats'), authors: all('SELECT * FROM authors'), pubs: all('SELECT * FROM pubs'), depts: all('SELECT * FROM depts ORDER BY name'), books: all('SELECT * FROM books'), notices: all('SELECT * FROM notices'), events: all('SELECT * FROM events'), faqs: all('SELECT * FROM faqs') };
   const bool = r => ({ ...r, paid: !!r.paid }), staff = all('SELECT * FROM staff');
   if (s && s.t === 'admin') {
     Object.assign(db, { staff, members: all('SELECT * FROM members').map(strip), users: s.u.role === ALL[0] ? all('SELECT * FROM users').map(strip) : [], issues: all('SELECT * FROM issues').map(bool), reserve: all('SELECT * FROM reserve'), renewq: all('SELECT * FROM renewq'), lost: all('SELECT * FROM lost'), suppliers: all('SELECT * FROM suppliers'), purchases: all('SELECT * FROM purchases'), notifs: [] });
@@ -187,6 +200,7 @@ const T = {
   pubs: { p: 'p', f: ['name', 'city'], req: ['name'], role: MGR },
   members: { p: 'm', f: ['name', 'email', 'phone', 'dept', 'roll', 'status', 'sq'], n: ['sq'], req: ['name', 'email', 'phone', 'dept', 'roll'], def: () => ({ joined: today(), status: 'active' }), role: ALL, cred: 1, en: { status: ['active', 'pending'] } },
   users: { p: 'u', f: ['name', 'email', 'role', 'sq'], n: ['sq'], req: ['name', 'email', 'role'], role: ADM, cred: 1, en: { role: ALL } },
+  depts: { p: 'd', f: ['name'], req: ['name'], role: MGR },
   staff: { p: 's', f: ['name', 'desig', 'phone'], req: ['name'], role: MGR },
   lost: { p: 'l', f: ['bookId', 'mid', 'type', 'date', 'charge'], n: ['charge'], req: ['bookId', 'mid', 'type', 'date'], ref: { bookId: 'books', mid: 'members' }, en: { type: ['হারানো', 'ক্ষতিগ্রস্ত'] }, role: MGR },
   suppliers: { p: 'v', f: ['name', 'phone', 'addr'], req: ['name'], role: MGR },
@@ -210,6 +224,7 @@ function clean(t, c, body, id) {
     if (o.copies < 1) throw V('There must be at least 1 copy', 'কপির সংখ্যা কমপক্ষে ১ হতে হবে');
     if (id && o.copies < outN(id) + lostN(id)) throw V('Copies cannot be fewer than the books currently issued', 'বর্তমানে ইস্যু করা বইয়ের চেয়ে কপি কম হতে পারে না');
   }
+  if (t === 'depts' && o.name && get('SELECT 1 x FROM depts WHERE name=? AND id<>?', o.name, id || '')) throw V('This department already exists', 'এই বিভাগ আগেই আছে');
   if (t === 'purchases' && o.qty !== undefined && o.qty < 1) throw V('Quantity must be at least 1', 'পরিমাণ কমপক্ষে ১ হতে হবে');
   if (c.cred) {
     if ('email' in o) { o.email = norm(o.email); if (!emailOk(o.email) || emailTaken(o.email, id)) throw V('This email is invalid or already in use', 'ইমেইলটি সঠিক নয় বা আগে থেকেই আছে'); }
@@ -229,6 +244,7 @@ function guardDelete(t, id, s) {
   if (t === 'cats' && get('SELECT 1 x FROM books WHERE catId=?', id)) G('This category still has books', 'এই ক্যাটাগরিতে বই আছে');
   if (t === 'authors' && get('SELECT 1 x FROM books WHERE authorId=?', id)) G('Books by this author are in the catalogue', 'এই লেখকের বই তালিকায় আছে');
   if (t === 'pubs' && get('SELECT 1 x FROM books WHERE pubId=?', id)) G('Books from this publisher are in the catalogue', 'এই প্রকাশকের বই তালিকায় আছে');
+  if (t === 'depts' && get('SELECT 1 x FROM members WHERE dept=?', r.name)) G('This department still has members', 'এই বিভাগে সদস্য আছে');
   if (t === 'members' && get('SELECT 1 x FROM issues WHERE mid=? AND ret IS NULL', id)) G('This member still has unreturned books', 'সদস্যের কাছে বই জমা না দেওয়া অবস্থায় আছে');
   if (t === 'users') { if (id === s.u.id) G('You cannot delete your own account', 'নিজের অ্যাকাউন্ট মুছা যাবে না'); if (r.role === ALL[0] && get('SELECT COUNT(*) n FROM users WHERE role=?', ALL[0]).n < 2) G('At least one admin is required', 'কমপক্ষে একজন অ্যাডমিন থাকতে হবে'); }
 }
@@ -239,9 +255,10 @@ function restore(o) {
     ORDER.forEach(t => run(`DELETE FROM "${t}"`));
     const cols = {}; ORDER.forEach(t => cols[t] = all(`PRAGMA table_info("${t}")`).map(c => c.name));
     const put = (t, rows) => (rows || []).forEach(r => { const row = {}; cols[t].forEach(k => { if (k in r) row[k] = typeof r[k] === 'boolean' ? +r[k] : r[k]; }); if (t === 'members' || t === 'users') { const k = keep[t + r.id]; row.pw = k ? k.pw : hashPw('changeme123'); row.sa = k ? k.sa : hashPw('dhaka'); } ins(t, row); });
-    ['cats', 'authors', 'pubs', 'staff', 'suppliers', 'members', 'users', 'books', 'issues', 'reserve', 'renewq', 'lost', 'purchases', 'notices', 'events', 'faqs'].forEach(t => put(t, o[t]));
+    ['cats', 'authors', 'pubs', 'depts', 'staff', 'suppliers', 'members', 'users', 'books', 'issues', 'reserve', 'renewq', 'lost', 'purchases', 'notices', 'events', 'faqs'].forEach(t => put(t, o[t]));
     (o.notifs || []).forEach(n => ins('notifs', { id: n.id, mid: n.mid, text: n.text, date: n.date, read: +!!n.read }));
     if (o.set) Object.entries(o.set).forEach(([k, v]) => run('INSERT OR REPLACE INTO settings VALUES(?,?)', k, String(v)));
+    ensureSettings(); ensureDepts();
     if (!get('SELECT COUNT(*) n FROM users WHERE role=?', ALL[0]).n) throw bad(400, 'The backup must contain at least one admin', 'ব্যাকআপে কমপক্ষে একজন অ্যাডমিন থাকতে হবে');
   });
 }
@@ -263,6 +280,7 @@ function api(req, res, m, p, body, s, ip) {
     const h = limit(ip, 'reg', 8, 10 * 60e3), em = norm(body.email), pw = str(body.pw, 100), sa = str(body.sa, 100);
     const d = { name: str(body.name), phone: str(body.phone, 40), dept: str(body.dept, 80), roll: str(body.roll, 40) };
     if (!d.name || !d.phone || !d.dept || !d.roll || !sa) throw bad(400, 'Please fill in all fields.', 'সব ঘর পূরণ করুন।');
+    if (!deptOk(d.dept)) throw bad(400, 'Please choose a department from the list.', 'তালিকা থেকে বিভাগ বাছাই করুন।');
     if (!emailOk(em)) throw bad(400, 'Enter a valid email address.', 'সঠিক ইমেইল দিন।');
     if (pw.length < 6) throw bad(400, 'Use a password of at least 6 characters.', 'কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন।');
     if (emailTaken(em)) throw bad(409, 'This email is already registered. Please sign in.', 'এই ইমেইলে আগেই নিবন্ধন হয়েছে। লগইন করুন।');
@@ -288,6 +306,7 @@ function api(req, res, m, p, body, s, ip) {
   if (m === 'PUT' && p === '/api/profile') {
     need(s); if (s.t !== 'member') throw bad(403, 'Members only', 'শুধু সদস্যদের জন্য');
     const d = { name: str(body.name), phone: str(body.phone, 40), dept: str(body.dept, 80) }; if (!d.name || !d.phone || !d.dept) throw bad(400, 'Please fill in all fields.', 'সব ঘর পূরণ করুন।');
+    if (d.dept !== s.u.dept && !deptOk(d.dept)) throw bad(400, 'Please choose a department from the list.', 'তালিকা থেকে বিভাগ বাছাই করুন।');
     run('UPDATE members SET name=?, phone=?, dept=? WHERE id=?', d.name, d.phone, d.dept, s.u.id); return ok(['Profile updated', 'প্রোফাইল হালনাগাদ হয়েছে']);
   }
   if (m === 'POST' && p === '/api/notifs/read') { if (s.t === 'member') run('UPDATE notifs SET "read"=1 WHERE mid=?', s.u.id); return ok(); }
@@ -326,6 +345,17 @@ function api(req, res, m, p, body, s, ip) {
     for (const k of ['name', 'en', 'addr', 'phone', 'email', 'open', 'close']) st[k] = str(body[k]);
     for (const k of ['fine', 'loan', 'max', 'rmax']) { const v = Number(body[k]); if (!Number.isFinite(v) || v < 0 || (k !== 'fine' && k !== 'rmax' && v < 1)) throw bad(400, `Invalid value: ${k}`, `মান সঠিক নয়: ${k}`); st[k] = v; }
     if (!st.name) throw bad(400, 'Organisation name is required', 'প্রতিষ্ঠানের নাম দিন');
+    for (const [k, mx] of [['hero', 120], ['herod', 400], ['days', 60], ['hero_en', 120], ['herod_en', 400], ['days_en', 60]]) if (body[k] !== undefined) st[k] = str(body[k], mx);
+    if (body.links !== undefined) {
+      const ls = String(body.links).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      if (ls.length > 8) throw bad(400, 'At most 8 footer links', 'ফুটারে সর্বোচ্চ ৮টি লিংক দেওয়া যাবে');
+      st.links = ls.map(l => { const [a, h, e] = l.split('|').map(x => str(x, 80)); if (!a || !/^(#[\w-]+|https?:\/\/[^\s|]+)$/.test(h || '')) throw bad(400, `Invalid link line: ${l}`, `লিংকের লাইনটি সঠিক নয়: ${l}। ফরম্যাট: নাম | #পেজ | ইংরেজি নাম`); return e ? `${a}|${h}|${e}` : `${a}|${h}`; }).join('\n');
+    }
+    if (body.logo !== undefined) {
+      const lg = String(body.logo);
+      if (lg !== '' && (lg.length > 300000 || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+\/=]+$/.test(lg))) throw bad(400, 'Logo must be a PNG, JPG or WebP image under about 200 KB', 'লোগো PNG, JPG বা WebP হতে হবে এবং প্রায় ২০০ কেবি-র কম হতে হবে');
+      st.logo = lg;
+    }
     Object.entries(st).forEach(([k, v]) => run('INSERT OR REPLACE INTO settings VALUES(?,?)', k, String(v))); return ok(['Settings saved', 'সেটিংস সংরক্ষিত হয়েছে']);
   }
   if (m === 'POST' && p === '/api/restore') { need(s, ADM); restore(body); return ok(['Data restored', 'ডেটা পুনরুদ্ধার হয়েছে']); }
@@ -333,7 +363,7 @@ function api(req, res, m, p, body, s, ip) {
   if ((x = /^\/api\/admin\/(\w+)(?:\/(\w+))?$/.exec(p)) && T[x[1]]) {
     const t = x[1], c = T[t]; need(s, c.role);
     if (m === 'POST' && !x[2]) { const o = { ...(c.def ? c.def() : {}), ...clean(t, c, body, null), id: c.p + uid() }; tx(() => { ins(t, o); if (t === 'purchases') run('UPDATE books SET copies=copies+? WHERE id=?', o.qty, o.bookId); }); return ok(['Saved', 'সংরক্ষণ হয়েছে']); }
-    if (m === 'PUT' && x[2]) { if (!get(`SELECT 1 x FROM "${t}" WHERE id=?`, x[2])) throw bad(404, 'Record not found', 'তথ্য পাওয়া যায়নি'); const o = clean(t, c, body, x[2]), k = Object.keys(o); if (k.length) run(`UPDATE "${t}" SET ${k.map(y => `"${y}"=?`).join(',')} WHERE id=?`, ...k.map(y => o[y]), x[2]); return ok(['Saved', 'সংরক্ষণ হয়েছে']); }
+    if (m === 'PUT' && x[2]) { const old = get(`SELECT * FROM "${t}" WHERE id=?`, x[2]); if (!old) throw bad(404, 'Record not found', 'তথ্য পাওয়া যায়নি'); const o = clean(t, c, body, x[2]), k = Object.keys(o); if (t === 'depts' && o.name && o.name !== old.name) run('UPDATE members SET dept=? WHERE dept=?', o.name, old.name); if (k.length) run(`UPDATE "${t}" SET ${k.map(y => `"${y}"=?`).join(',')} WHERE id=?`, ...k.map(y => o[y]), x[2]); return ok(['Saved', 'সংরক্ষণ হয়েছে']); }
     if (m === 'DELETE' && x[2]) { guardDelete(t, x[2], s); run(`DELETE FROM "${t}" WHERE id=?`, x[2]); if (t === 'users' || t === 'members') run('DELETE FROM sessions WHERE uid=?', x[2]); return ok(['Deleted', 'মুছে ফেলা হয়েছে']); }
   }
   throw bad(404, 'Not found', 'পাওয়া যায়নি');
